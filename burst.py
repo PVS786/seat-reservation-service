@@ -3,16 +3,23 @@ import jwt
 import requests
 import random
 import uuid
+import os
+from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 
-BASE_URL = "http://127.0.0.1:8001"
+load_dotenv()
+
+BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8001")
 REQUESTS = 100
 CONCURRENCY = 50
-JWT_SECRET = "test_secret"
+BURST_JWT_SECRET = os.getenv("BURST_JWT_SECRET")
+
+if not BURST_JWT_SECRET:
+    raise RuntimeError("BURST_JWT_SECRET environment variable is required for testing")
 
 def generate_token(user_id: str, role: str = "user") -> str:
-    return jwt.encode({"sub": user_id, "role": role}, JWT_SECRET, algorithm="HS256")
+    return jwt.encode({"sub": user_id, "role": role}, BURST_JWT_SECRET, algorithm="HS256")
 
 def create_show(name: str, seats: list) -> str:
     resp = requests.post(

@@ -6,9 +6,10 @@ from httpx import AsyncClient, ASGITransport
 from sqlalchemy import text
 from app.main import app
 from app.database import engine
+from app.auth import JWT_SECRET
 
 def create_token(user_id: str) -> str:
-    return jwt.encode({"sub": user_id}, "test_secret", algorithm="HS256")
+    return jwt.encode({"sub": user_id}, JWT_SECRET, algorithm="HS256")
 
 import pytest_asyncio
 
@@ -32,7 +33,7 @@ async def create_show(client: AsyncClient, name="test-show", seats=None, price=1
         seats = ["A1", "A2", "A3", "A4", "A5"]
     
     if token is None:
-        token = jwt.encode({"sub": "admin1", "role": "admin"}, "test_secret", algorithm="HS256")
+        token = jwt.encode({"sub": "admin1", "role": "admin"}, JWT_SECRET, algorithm="HS256")
         
     headers = {"Authorization": f"Bearer {token}"} if token != "no_token" else {}
         
@@ -374,13 +375,13 @@ async def test_get_unknown_show_404(client: AsyncClient):
 # --- Admin Auth Tests ---
 @pytest.mark.asyncio
 async def test_admin_can_create_show(client: AsyncClient):
-    token = jwt.encode({"sub": "admin1", "role": "admin"}, "test_secret", algorithm="HS256")
+    token = jwt.encode({"sub": "admin1", "role": "admin"}, JWT_SECRET, algorithm="HS256")
     res = await client.post("/shows", json={"name": "test", "seats": ["A1"], "price_paise": 100}, headers={"Authorization": f"Bearer {token}"})
     assert res.status_code == 201
 
 @pytest.mark.asyncio
 async def test_non_admin_cannot_create_show(client: AsyncClient):
-    token = jwt.encode({"sub": "user1", "role": "user"}, "test_secret", algorithm="HS256")
+    token = jwt.encode({"sub": "user1", "role": "user"}, JWT_SECRET, algorithm="HS256")
     res = await client.post("/shows", json={"name": "test", "seats": ["A1"], "price_paise": 100}, headers={"Authorization": f"Bearer {token}"})
     assert res.status_code == 403
 

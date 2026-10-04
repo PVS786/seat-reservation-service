@@ -1,8 +1,13 @@
 import jwt
 from fastapi import Header, HTTPException, status
 import os
+from dotenv import load_dotenv
 
-JWT_SECRET = os.getenv("JWT_SECRET", "test_secret")
+load_dotenv()
+
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET environment variable is required")
 
 def get_current_user(authorization: str = Header(default=None)) -> dict:
     if not authorization or not authorization.startswith("Bearer "):
