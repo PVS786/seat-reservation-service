@@ -218,10 +218,32 @@ def run_multi_seat():
         "Available": show["available"]
     }, m_pass, recon_pass, scen_pass)
 
+def run_health():
+    import time
+    start = time.time()
+    try:
+        live = requests.get(f"{BASE_URL}/health/live")
+        ready = requests.get(f"{BASE_URL}/health/ready")
+    except requests.RequestException as e:
+        print(f"Health check failed to connect: {e}")
+        return
+        
+    dur = time.time() - start
+    scen_pass = (
+        live.status_code == 200 and live.json() == {"status": "ok"} and
+        ready.status_code == 200 and ready.json() == {"status": "ready", "database": "ok"}
+    )
+    
+    print("Scenario: health")
+    print(f"Live Status: {live.status_code}")
+    print(f"Ready Status: {ready.status_code}")
+    print(f"Duration: {dur:.3f}s\n")
+    print(f"Scenario: {'PASS' if scen_pass else 'FAIL'}")
+
 def main():
     global REQUESTS, CONCURRENCY
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenario", required=True, choices=["hot-seat", "per-user-limit", "idempotency", "same-key-different-request", "multi-seat"])
+    parser.add_argument("--scenario", required=True, choices=["hot-seat", "per-user-limit", "idempotency", "same-key-different-request", "multi-seat", "health"])
     parser.add_argument("--requests", type=int, default=REQUESTS)
     parser.add_argument("--concurrency", type=int, default=CONCURRENCY)
     args = parser.parse_args()
