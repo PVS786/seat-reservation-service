@@ -11,6 +11,9 @@ from app.repositories.seat_repository import SeatRepository
 from app.repositories.reservation_repository import ReservationRepository
 from app.repositories.booking_state_repository import BookingStateRepository
 from app.metrics import reservations_confirmed_total, reservations_declined_total
+import logging
+
+logger = logging.getLogger(__name__)
 
 def _generate_request_hash(seats: List[str]) -> str:
     sorted_seats = sorted(seats)
@@ -53,6 +56,7 @@ class ReservationService:
                     if existing_res.request_hash == req_hash:
                         res_seats = await self.reservation_repo.get_reservation_seats(str(existing_res.id))
                         reservations_declined_total.labels(reason="idempotent-replay").inc()
+                        logger.info("idempotent replay", extra={"show_id": show_id, "user_id": user_id, "reservation_id": existing_res.id, "operation": "reserve", "result": "idempotent-replay"})
                         return ReserveResponse(
                             reservation_id=existing_res.id,
                             show_id=existing_res.show_id,
@@ -62,21 +66,25 @@ class ReservationService:
                             status=existing_res.status
                         )
                     else:
+                        logger.warning("reservation declined", extra={"show_id": show_id, "user_id": user_id, "operation": "reserve", "reason": "idempotent-conflict"})
                         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Idempotency key reused with different request")
 
                 seats = await self.seat_repo.get_seats_for_update(show_id, canonical_seats)
 
                 if len(seats) != requested_count:
                     reservations_declined_total.labels(reason="seat-taken").inc()
+                    logger.warning("reservation declined", extra={"show_id": show_id, "user_id": user_id, "operation": "reserve", "reason": "seat-taken"})
                     raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="One or more requested seats do not exist")
 
                 for seat in seats:
                     if seat.status != 'available':
                         reservations_declined_total.labels(reason="seat-taken").inc()
+                        logger.warning("reservation declined", extra={"show_id": show_id, "user_id": user_id, "operation": "reserve", "reason": "seat-taken"})
                         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Seat {seat.seat_number} is not available")
 
                 if booking_state.active_seat_count + requested_count > show.per_user_limit:
                     reservations_declined_total.labels(reason="per-user-limit").inc()
+                    logger.warning("reservation declined", extra={"show_id": show_id, "user_id": user_id, "operation": "reserve", "reason": "per-user-limit"})
                     raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Per-user limit exceeded")
 
                 amount_paise = show.price_paise * requested_count
@@ -107,6 +115,8 @@ class ReservationService:
                     amount_paise=new_res.amount_paise,
                     status=new_res.status
                 )
+                
+                logger.info("reservation confirmed", extra={"show_id": show_id, "user_id": user_id, "reservation_id": new_res.id, "operation": "reserve", "result": "confirmed"})
                 
         except IntegrityError:
             raise HTTPException(status_code=409, detail="Database constraint violation")
