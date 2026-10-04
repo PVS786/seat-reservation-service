@@ -5,19 +5,19 @@ registry = CollectorRegistry()
 reservations_confirmed_total = Counter(
     "reservations_confirmed_total",
     "Number of NEW reservations successfully committed",
-    registry=registry
+    registry=registry,
 )
 
 reservations_declined_total = Counter(
     "reservations_declined_total",
     "Number of reservations declined",
     ["reason"],
-    registry=registry
+    registry=registry,
 )
 
 seats_available = Gauge(
     "seats_available",
     "Current number of seats available",
     ["show_id"],
-    registry=registry
+    registry=registry,
 )

@@ -1,10 +1,12 @@
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException
-from app.models import Show, Seat
-from app.schemas import ShowCreate, ShowDetailResponse, SeatResponse
-from app.repositories.show_repository import ShowRepository
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import Seat, Show
 from app.repositories.seat_repository import SeatRepository
+from app.repositories.show_repository import ShowRepository
+from app.schemas import SeatResponse, ShowCreate, ShowDetailResponse
+
 
 class ShowService:
     def __init__(self, db: AsyncSession):
@@ -14,17 +16,19 @@ class ShowService:
 
     async def create_show(self, show_in: ShowCreate) -> Show:
         if not show_in.seats:
-            raise HTTPException(status_code=400, detail="Must provide at least one seat")
-            
+            raise HTTPException(
+                status_code=400, detail="Must provide at least one seat"
+            )
+
         if len(show_in.seats) != len(set(show_in.seats)):
             raise HTTPException(status_code=400, detail="Duplicate seats in request")
 
         new_show = Show(
             name=show_in.name,
             price_paise=show_in.price_paise,
-            total_seats=len(show_in.seats)
+            total_seats=len(show_in.seats),
         )
-        
+
         try:
             async with self.db.begin():
                 self.show_repo.add(new_show)
@@ -37,8 +41,6 @@ class ShowService:
             raise HTTPException(status_code=409, detail="Database constraint violation")
         except HTTPException:
             raise
-        except Exception:
-            raise HTTPException(status_code=500, detail="Failed to create show")
 
         return new_show
 
@@ -46,19 +48,21 @@ class ShowService:
         show = await self.show_repo.get_by_id(show_id)
         if not show:
             raise HTTPException(status_code=404, detail="Show not found")
-        
+
         seats = await self.seat_repo.get_seats_by_show_id_ordered(show_id)
-        
+
         available = 0
         confirmed = 0
         seat_responses = []
         for seat in seats:
-            if seat.status == 'available':
+            if seat.status == "available":
                 available += 1
-            elif seat.status == 'confirmed':
+            elif seat.status == "confirmed":
                 confirmed += 1
-            seat_responses.append(SeatResponse(seat_number=seat.seat_number, status=seat.status))
-            
+            seat_responses.append(
+                SeatResponse(seat_number=seat.seat_number, status=seat.status)
+            )
+
         return ShowDetailResponse(
             id=show.id,
             name=show.name,
@@ -68,5 +72,5 @@ class ShowService:
             seats=seat_responses,
             available=available,
             held=0,
-            confirmed=confirmed
+            confirmed=confirmed,
         )
