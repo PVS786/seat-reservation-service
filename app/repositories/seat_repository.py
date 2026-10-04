@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy import func
 from typing import List
 from app.models import Seat
 
@@ -24,3 +25,11 @@ class SeatRepository:
             .where(Seat.show_id == show_id)
             .order_by(Seat.seat_number)
         )).scalars().all())
+
+    async def get_available_seat_counts(self) -> dict:
+        result = await self.db.execute(
+            select(Seat.show_id, func.count(Seat.id))
+            .where(Seat.status == 'available')
+            .group_by(Seat.show_id)
+        )
+        return {str(row[0]): row[1] for row in result.all()}

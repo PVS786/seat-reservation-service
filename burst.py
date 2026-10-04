@@ -30,6 +30,45 @@ def get_show(show_id: str) -> dict:
     resp.raise_for_status()
     return resp.json()
 
+def get_metrics(show_id: str = None) -> dict:
+    resp = requests.get(f"{BASE_URL}/metrics")
+    resp.raise_for_status()
+    text = resp.text
+    
+    metrics = {
+        "confirmed": 0.0,
+        "seat-taken": 0.0,
+        "per-user-limit": 0.0,
+        "idempotent-replay": 0.0,
+        "seats_available": 0.0
+    }
+    
+    for line in text.splitlines():
+        if line.startswith("#"):
+            continue
+        if line.startswith("reservations_confirmed_total"):
+            parts = line.split()
+            if len(parts) >= 2:
+                metrics["confirmed"] = float(parts[1])
+        elif line.startswith('reservations_declined_total{reason="seat-taken"}'):
+            parts = line.split()
+            if len(parts) >= 2:
+                metrics["seat-taken"] = float(parts[1])
+        elif line.startswith('reservations_declined_total{reason="per-user-limit"}'):
+            parts = line.split()
+            if len(parts) >= 2:
+                metrics["per-user-limit"] = float(parts[1])
+        elif line.startswith('reservations_declined_total{reason="idempotent-replay"}'):
+            parts = line.split()
+            if len(parts) >= 2:
+                metrics["idempotent-replay"] = float(parts[1])
+        elif show_id and line.startswith(f'seats_available{{show_id="{show_id}"}}'):
+            parts = line.split()
+            if len(parts) >= 2:
+                metrics["seats_available"] = float(parts[1])
+                
+    return metrics
+
 def reserve(show_id: str, token: str, idempotency_key: str, seats: list) -> dict:
     try:
         resp = requests.post(
@@ -57,7 +96,7 @@ def check_reconciliation(show_id: str) -> tuple[bool, dict]:
     reconciled = (state["available"] + state["held"] + state["confirmed"]) == state["total_seats"]
     return reconciled, state
 
-def print_results(scenario: str, results: list, duration: float, state: dict, reconciled: bool, scenario_pass: bool, extra_info: str = ""):
+def print_results(scenario: str, results: list, duration: float, state: dict, reconciled: bool, scenario_pass: bool, metrics_delta: dict, metrics_pass: bool, extra_info: str = ""):
     status_counts = Counter(r["status_code"] for r in results)
     server_errors = sum(v for k, v in status_counts.items() if isinstance(k, int) and k >= 500)
     client_errors = status_counts.get("error", 0)
@@ -79,8 +118,16 @@ def print_results(scenario: str, results: list, duration: float, state: dict, re
     print(f"Confirmed: {state['confirmed']}")
     print(f"Held: {state['held']}\n")
     
+    print("Metrics:")
+    print(f"Confirmed delta: {metrics_delta['confirmed']}")
+    print(f"Seat-taken delta: {metrics_delta['seat-taken']}")
+    print(f"Per-user-limit delta: {metrics_delta['per-user-limit']}")
+    print(f"Idempotent-replay delta: {metrics_delta['idempotent-replay']}")
+    print(f"Seats available metric: {metrics_delta['seats_available']}\n")
+    
+    print(f"Metrics reconciliation: {'PASS' if metrics_pass else 'FAIL'}")
     print(f"Reconciliation: {'PASS' if reconciled else 'FAIL'}")
-    print(f"Scenario: {'PASS' if scenario_pass else 'FAIL'}")
+    print(f"Scenario: {'PASS' if scenario_pass and metrics_pass else 'FAIL'}")
 
 
 #SCENARIOS
@@ -92,11 +139,18 @@ def run_hot_seat():
         token = generate_token(f"user-{i}")
         tasks.append((show_id, token, str(uuid.uuid4()), ["A1"]))
     
+    baseline_metrics = get_metrics(show_id)
+    
     start_time = time.time()
     results = run_concurrent_requests(tasks)
     duration = time.time() - start_time
     
     reconciled, state = check_reconciliation(show_id)
+    final_metrics = get_metrics(show_id)
+    
+    metrics_delta = {k: final_metrics[k] - baseline_metrics[k] for k in baseline_metrics if k != "seats_available"}
+    metrics_delta["seats_available"] = final_metrics["seats_available"]
+    
     status_counts = Counter(r["status_code"] for r in results)
     server_errors = sum(v for k, v in status_counts.items() if isinstance(k, int) and k >= 500)
     
@@ -110,7 +164,12 @@ def run_hot_seat():
         state["available"] == 0 and
         reconciled
     )
-    print_results("HOT SEAT", results, duration, state, reconciled, scenario_pass)
+    metrics_pass = (
+        metrics_delta["confirmed"] == 1 and
+        metrics_delta["seat-taken"] == (REQUESTS - 1) and
+        metrics_delta["seats_available"] == state["available"]
+    )
+    print_results("HOT SEAT", results, duration, state, reconciled, scenario_pass, metrics_delta, metrics_pass)
 
 def run_per_user_limit():
     seats = [f"S{i}" for i in range(REQUESTS)]
@@ -121,11 +180,18 @@ def run_per_user_limit():
     for i in range(REQUESTS):
         tasks.append((show_id, token, str(uuid.uuid4()), [seats[i]]))
         
+    baseline_metrics = get_metrics(show_id)
+        
     start_time = time.time()
     results = run_concurrent_requests(tasks)
     duration = time.time() - start_time
     
     reconciled, state = check_reconciliation(show_id)
+    final_metrics = get_metrics(show_id)
+    
+    metrics_delta = {k: final_metrics[k] - baseline_metrics[k] for k in baseline_metrics if k != "seats_available"}
+    metrics_delta["seats_available"] = final_metrics["seats_available"]
+    
     status_counts = Counter(r["status_code"] for r in results)
     server_errors = sum(v for k, v in status_counts.items() if isinstance(k, int) and k >= 500)
     
@@ -136,7 +202,12 @@ def run_per_user_limit():
         status_counts.get("error", 0) == 0 and
         reconciled
     )
-    print_results("PER-USER LIMIT", results, duration, state, reconciled, scenario_pass)
+    metrics_pass = (
+        metrics_delta["confirmed"] == status_counts.get(201, 0) and
+        metrics_delta["per-user-limit"] == status_counts.get(409, 0) and
+        metrics_delta["seats_available"] == state["available"]
+    )
+    print_results("PER-USER LIMIT", results, duration, state, reconciled, scenario_pass, metrics_delta, metrics_pass)
 
 def run_idempotency():
     show_id = create_show("Idempotency Show", ["A1"])
@@ -147,11 +218,18 @@ def run_idempotency():
     for _ in range(REQUESTS):
         tasks.append((show_id, token, key, ["A1"]))
         
+    baseline_metrics = get_metrics(show_id)
+        
     start_time = time.time()
     results = run_concurrent_requests(tasks)
     duration = time.time() - start_time
     
     reconciled, state = check_reconciliation(show_id)
+    final_metrics = get_metrics(show_id)
+    
+    metrics_delta = {k: final_metrics[k] - baseline_metrics[k] for k in baseline_metrics if k != "seats_available"}
+    metrics_delta["seats_available"] = final_metrics["seats_available"]
+    
     status_counts = Counter(r["status_code"] for r in results)
     server_errors = sum(v for k, v in status_counts.items() if isinstance(k, int) and k >= 500)
     
@@ -166,7 +244,12 @@ def run_idempotency():
         server_errors == 0 and
         reconciled
     )
-    print_results("IDEMPOTENCY REPLAY", results, duration, state, reconciled, scenario_pass, f"Unique reservation IDs: {len(unique_ids)}")
+    metrics_pass = (
+        metrics_delta["confirmed"] == 1 and
+        metrics_delta["idempotent-replay"] == (REQUESTS - 1) and
+        metrics_delta["seats_available"] == state["available"]
+    )
+    print_results("IDEMPOTENCY REPLAY", results, duration, state, reconciled, scenario_pass, metrics_delta, metrics_pass, f"Unique reservation IDs: {len(unique_ids)}")
 
 def run_same_key_different_request():
     seats = [f"S{i}" for i in range(REQUESTS)]
@@ -178,11 +261,18 @@ def run_same_key_different_request():
     for i in range(REQUESTS):
         tasks.append((show_id, token, key, [seats[i]]))
         
+    baseline_metrics = get_metrics(show_id)
+        
     start_time = time.time()
     results = run_concurrent_requests(tasks)
     duration = time.time() - start_time
     
     reconciled, state = check_reconciliation(show_id)
+    final_metrics = get_metrics(show_id)
+    
+    metrics_delta = {k: final_metrics[k] - baseline_metrics[k] for k in baseline_metrics if k != "seats_available"}
+    metrics_delta["seats_available"] = final_metrics["seats_available"]
+    
     status_counts = Counter(r["status_code"] for r in results)
     server_errors = sum(v for k, v in status_counts.items() if isinstance(k, int) and k >= 500)
     
@@ -192,7 +282,11 @@ def run_same_key_different_request():
         server_errors == 0 and
         reconciled
     )
-    print_results("SAME KEY DIFFERENT REQUEST", results, duration, state, reconciled, scenario_pass)
+    metrics_pass = (
+        metrics_delta["confirmed"] == 1 and
+        metrics_delta["seats_available"] == state["available"]
+    )
+    print_results("SAME KEY DIFFERENT REQUEST", results, duration, state, reconciled, scenario_pass, metrics_delta, metrics_pass)
 
 def run_multi_seat():
     seats = [f"M{i}" for i in range(20)]
@@ -206,11 +300,18 @@ def run_multi_seat():
         req_seats = random.sample(seats, 3)
         tasks.append((show_id, token, key, req_seats))
         
+    baseline_metrics = get_metrics(show_id)
+        
     start_time = time.time()
     results = run_concurrent_requests(tasks)
     duration = time.time() - start_time
     
     reconciled, state = check_reconciliation(show_id)
+    final_metrics = get_metrics(show_id)
+    
+    metrics_delta = {k: final_metrics[k] - baseline_metrics[k] for k in baseline_metrics if k != "seats_available"}
+    metrics_delta["seats_available"] = final_metrics["seats_available"]
+    
     status_counts = Counter(r["status_code"] for r in results)
     server_errors = sum(v for k, v in status_counts.items() if isinstance(k, int) and k >= 500)
     
@@ -230,7 +331,13 @@ def run_multi_seat():
     if duplicates or not confirmed_match or server_errors > 0 or not reconciled:
         scenario_pass = False
         
-    print_results("MULTI SEAT ALL-OR-NOTHING", results, duration, state, reconciled, scenario_pass)
+    metrics_pass = (
+        metrics_delta["confirmed"] == status_counts.get(201, 0) and
+        metrics_delta["seat-taken"] == status_counts.get(409, 0) and
+        metrics_delta["seats_available"] == state["available"]
+    )
+        
+    print_results("MULTI SEAT ALL-OR-NOTHING", results, duration, state, reconciled, scenario_pass, metrics_delta, metrics_pass)
 
 
 def main():

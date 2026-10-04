@@ -10,6 +10,7 @@ from app.repositories.show_repository import ShowRepository
 from app.repositories.seat_repository import SeatRepository
 from app.repositories.reservation_repository import ReservationRepository
 from app.repositories.booking_state_repository import BookingStateRepository
+from app.metrics import reservations_confirmed_total, reservations_declined_total
 
 def _generate_request_hash(seats: List[str]) -> str:
     sorted_seats = sorted(seats)
@@ -51,6 +52,7 @@ class ReservationService:
                 if existing_res:
                     if existing_res.request_hash == req_hash:
                         res_seats = await self.reservation_repo.get_reservation_seats(str(existing_res.id))
+                        reservations_declined_total.labels(reason="idempotent-replay").inc()
                         return ReserveResponse(
                             reservation_id=existing_res.id,
                             show_id=existing_res.show_id,
@@ -65,13 +67,16 @@ class ReservationService:
                 seats = await self.seat_repo.get_seats_for_update(show_id, canonical_seats)
 
                 if len(seats) != requested_count:
+                    reservations_declined_total.labels(reason="seat-taken").inc()
                     raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="One or more requested seats do not exist")
 
                 for seat in seats:
                     if seat.status != 'available':
+                        reservations_declined_total.labels(reason="seat-taken").inc()
                         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Seat {seat.seat_number} is not available")
 
                 if booking_state.active_seat_count + requested_count > show.per_user_limit:
+                    reservations_declined_total.labels(reason="per-user-limit").inc()
                     raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Per-user limit exceeded")
 
                 amount_paise = show.price_paise * requested_count
@@ -106,6 +111,7 @@ class ReservationService:
         except IntegrityError:
             raise HTTPException(status_code=409, detail="Database constraint violation")
 
+        reservations_confirmed_total.inc()
         return response
 
     async def cancel_reservation(self, reservation_id: str, user_id: str) -> CancelResponse:
