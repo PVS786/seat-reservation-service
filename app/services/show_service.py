@@ -2,7 +2,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException
 from app.models import Show, Seat
-from app.schemas import ShowCreate
+from app.schemas import ShowCreate, ShowDetailResponse, SeatResponse
 from app.repositories.show_repository import ShowRepository
 from app.repositories.seat_repository import SeatRepository
 
@@ -41,3 +41,32 @@ class ShowService:
             raise HTTPException(status_code=500, detail="Failed to create show")
 
         return new_show
+
+    async def get_show_detail(self, show_id: str) -> ShowDetailResponse:
+        show = await self.show_repo.get_by_id(show_id)
+        if not show:
+            raise HTTPException(status_code=404, detail="Show not found")
+        
+        seats = await self.seat_repo.get_seats_by_show_id_ordered(show_id)
+        
+        available = 0
+        confirmed = 0
+        seat_responses = []
+        for seat in seats:
+            if seat.status == 'available':
+                available += 1
+            elif seat.status == 'confirmed':
+                confirmed += 1
+            seat_responses.append(SeatResponse(seat_number=seat.seat_number, status=seat.status))
+            
+        return ShowDetailResponse(
+            id=show.id,
+            name=show.name,
+            price_paise=show.price_paise,
+            per_user_limit=show.per_user_limit,
+            total_seats=show.total_seats,
+            seats=seat_responses,
+            available=available,
+            held=0,
+            confirmed=confirmed
+        )

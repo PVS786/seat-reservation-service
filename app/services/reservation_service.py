@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
 from app.models import Reservation, ReservationSeat
-from app.schemas import ReserveRequest, ReserveResponse
+from app.schemas import ReserveRequest, ReserveResponse, CancelResponse
 from app.repositories.show_repository import ShowRepository
 from app.repositories.seat_repository import SeatRepository
 from app.repositories.reservation_repository import ReservationRepository
@@ -105,5 +105,63 @@ class ReservationService:
                 
         except IntegrityError:
             raise HTTPException(status_code=409, detail="Database constraint violation")
+
+        return response
+
+    async def cancel_reservation(self, reservation_id: str, user_id: str) -> CancelResponse:
+        try:
+            async with self.db.begin():
+                reservation = await self.reservation_repo.get_by_id(reservation_id)
+                if not reservation:
+                    raise HTTPException(status_code=404, detail="Reservation not found")
+                
+                if reservation.user_id != user_id:
+                    raise HTTPException(status_code=403, detail="Not authorized to cancel this reservation")
+
+                show_id = str(reservation.show_id)
+
+                booking_state = await self.booking_repo.get_for_update(show_id, user_id)
+                if not booking_state:
+                    raise HTTPException(status_code=500, detail="Could not lock booking state")
+
+                reservation_locked = await self.reservation_repo.get_by_id_for_update(reservation_id)
+                if not reservation_locked:
+                    raise HTTPException(status_code=404, detail="Reservation not found")
+
+                if reservation_locked.user_id != user_id:
+                    raise HTTPException(status_code=403, detail="Not authorized to cancel this reservation")
+                
+                if reservation_locked.status == 'cancelled':
+                    raise HTTPException(status_code=409, detail="Reservation is already cancelled")
+                elif reservation_locked.status != 'confirmed':
+                    raise HTTPException(status_code=409, detail="Reservation cannot be cancelled in its current state")
+
+                seat_numbers = await self.reservation_repo.get_reservation_seats(reservation_id)
+                seats = await self.seat_repo.get_seats_for_update(show_id, seat_numbers)
+
+                for seat in seats:
+                    if seat.status != 'confirmed':
+                        raise HTTPException(status_code=409, detail=f"Seat {seat.seat_number} is not confirmed")
+                    seat.status = 'available'
+
+                booking_state.active_seat_count -= len(seats)
+
+                from datetime import datetime, timezone
+                reservation_locked.status = 'cancelled'
+                reservation_locked.cancelled_at = datetime.now(timezone.utc)
+                
+                response = CancelResponse(
+                    reservation_id=reservation_locked.id,
+                    show_id=reservation_locked.show_id,
+                    user_id=reservation_locked.user_id,
+                    seats=sorted(seat_numbers),
+                    status=reservation_locked.status
+                )
+        except IntegrityError:
+            raise HTTPException(status_code=409, detail="Database constraint violation")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=500, detail="Internal server error")
 
         return response

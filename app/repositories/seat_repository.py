@@ -17,3 +17,10 @@ class SeatRepository:
             .order_by(Seat.seat_number)
             .with_for_update()
         )).scalars().all())
+
+    async def get_seats_by_show_id_ordered(self, show_id: str) -> List[Seat]:
+        return list((await self.db.execute(
+            select(Seat)
+            .where(Seat.show_id == show_id)
+            .order_by(Seat.seat_number)
+        )).scalars().all())

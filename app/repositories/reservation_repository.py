@@ -18,6 +18,16 @@ class ReservationRepository:
             .with_for_update()
         )).scalar_one_or_none()
 
+    async def get_by_id_for_update(self, reservation_id: str) -> Reservation | None:
+        return (await self.db.execute(
+            select(Reservation).where(Reservation.id == reservation_id).with_for_update()
+        )).scalar_one_or_none()
+
+    async def get_by_id(self, reservation_id: str) -> Reservation | None:
+        return (await self.db.execute(
+            select(Reservation).where(Reservation.id == reservation_id)
+        )).scalar_one_or_none()
+
     async def get_reservation_seats(self, reservation_id: str) -> List[str]:
         return list((await self.db.execute(
             select(Seat.seat_number)
