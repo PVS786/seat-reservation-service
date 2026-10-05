@@ -15,6 +15,12 @@ reservations_declined_total = Counter(
     registry=registry,
 )
 
+idempotent_replays_total = Counter(
+    "idempotent_replays_total",
+    "Number of requests that replayed an existing successful reservation",
+    registry=registry,
+)
+
 seats_available = Gauge(
     "seats_available",
     "Current number of seats available",

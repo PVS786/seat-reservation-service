@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8001")
+BASE_URL = os.getenv("BASE_URL", "https://seat-reservation-service-iuz0.onrender.com")
 REQUESTS = 100
 CONCURRENCY = 50
 BURST_JWT_SECRET = os.getenv("BURST_JWT_SECRET")
@@ -31,19 +31,31 @@ def create_show(name: str, seats: list) -> str:
         f"{BASE_URL}/shows",
         headers={"Authorization": f"Bearer {generate_token('admin', role='admin')}"},
         json={"name": name, "seats": seats, "price_paise": 1000},
+        timeout=15,
     )
     resp.raise_for_status()
     return resp.json()["id"]
 
+def get_show_state(show_id: str):
+    try:
+        resp = requests.get(f"{BASE_URL}/shows/{show_id}", timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.RequestException:
+        return None
+
 
 def get_metrics(show_id: str) -> dict:
-    resp = requests.get(f"{BASE_URL}/metrics")
-    resp.raise_for_status()
+    try:
+        resp = requests.get(f"{BASE_URL}/metrics", timeout=15)
+        resp.raise_for_status()
+    except requests.RequestException:
+        return {"confirmed": 0, "seat-unavailable": 0, "per-user-limit": 0, "idempotent_replays": 0, "seats_available": 0}
     m = {
         "confirmed": 0,
-        "seat-taken": 0,
+        "seat-unavailable": 0,
         "per-user-limit": 0,
-        "idempotent-replay": 0,
+        "idempotent_replays": 0,
         "seats_available": 0,
     }
     for line in resp.text.splitlines():
@@ -55,12 +67,12 @@ def get_metrics(show_id: str) -> dict:
         val = int(float(parts[1]))
         if line.startswith("reservations_confirmed_total"):
             m["confirmed"] = val
-        elif line.startswith('reservations_declined_total{reason="seat-taken"}'):
-            m["seat-taken"] = val
+        elif line.startswith('reservations_declined_total{reason="seat-unavailable"}'):
+            m["seat-unavailable"] = val
         elif line.startswith('reservations_declined_total{reason="per-user-limit"}'):
             m["per-user-limit"] = val
-        elif line.startswith('reservations_declined_total{reason="idempotent-replay"}'):
-            m["idempotent-replay"] = val
+        elif line.startswith('idempotent_replays_total'):
+            m["idempotent_replays"] = val
         elif line.startswith(f'seats_available{{show_id="{show_id}"}}'):
             m["seats_available"] = val
     return m
@@ -72,6 +84,7 @@ def reserve(show_id: str, token: str, key: str, seats: list) -> dict:
             f"{BASE_URL}/shows/{show_id}/reserve",
             headers={"Authorization": f"Bearer {token}", "Idempotency-Key": key},
             json={"seats": seats},
+            timeout=15,
         )
         return {
             "status": resp.status_code,
@@ -96,23 +109,35 @@ def print_result(
     metrics_pass: bool,
     recon_pass: bool,
     scenario_pass: bool,
+    show: dict | None = None,
 ):
-    print(f"Scenario: {scenario}")
-    print(f"Requests: {REQUESTS}")
-    print(f"Concurrency: {CONCURRENCY}\n")
-    print(f"201: {status_counts.get(201, 0)}")
-    print(f"409: {status_counts.get(409, 0)}")
-    print(
-        f"5xx: {sum(v for k, v in status_counts.items() if isinstance(k, int) and k >= 500)}"
-    )
-    print(f"Client errors: {status_counts.get('error', 0)}\n")
+    print(f"BASE_URL: {BASE_URL}")
+    print(f"REQUESTS: {REQUESTS}")
+    print(f"CONCURRENCY: {CONCURRENCY}\n")
 
+    print("=== HTTP RESULTS ===")
+    print(f"201 Created: {status_counts.get(201, 0)}")
+    print(f"409 Conflict: {status_counts.get(409, 0)}")
+    print(
+        f"5xx Errors: {sum(v for k, v in status_counts.items() if isinstance(k, int) and k >= 500)}"
+    )
+    print(f"Client Errors: {status_counts.get('error', 0)}\n")
+
+    print("=== METRICS (/metrics) ===")
     for k, v in extra_metrics.items():
         print(f"{k}: {v}")
 
-    print(f"\nReconciliation: {'PASS' if recon_pass and metrics_pass else 'FAIL'}")
+    print("\n=== RECONCILIATION ===")
+    if show:
+        print(f"Available: {show['available']}")
+        print(f"Held: {show['held']}")
+        print(f"Confirmed: {show['confirmed']}")
+        print(f"Total: {show['total_seats']}\n")
+    print(f"Reconciliation: {'PASS' if recon_pass and metrics_pass else 'FAIL'}\n")
+
+    print("=== SCENARIO ===")
     print(
-        f"Scenario: {'PASS' if scenario_pass and metrics_pass and recon_pass else 'FAIL'}"
+        f"{scenario.upper()}: {'PASS' if scenario_pass and metrics_pass and recon_pass else 'FAIL'}"
     )
 
 
@@ -127,15 +152,20 @@ def run_hot_seat():
     results = run_concurrent(tasks)
     m_end = get_metrics(show_id)
 
-    show = requests.get(f"{BASE_URL}/shows/{show_id}").json()
     st = Counter(r["status"] for r in results)
+    no_errors = st.get("error", 0) == 0 and sum(v for k, v in st.items() if isinstance(k, int) and k >= 500) == 0
+
+    show = get_show_state(show_id)
+    if not show:
+        print_result("hot-seat", st, {"Error": "Failed to fetch show"}, False, False, False)
+        return
 
     recon_pass = (
         show["available"] + show["held"] + show["confirmed"] == show["total_seats"]
     )
     m_pass = (
         (m_end["confirmed"] - m_start["confirmed"]) == 1
-        and (m_end["seat-taken"] - m_start["seat-taken"]) == (REQUESTS - 1)
+        and (m_end["seat-unavailable"] - m_start["seat-unavailable"]) == (REQUESTS - 1)
         and m_end["seats_available"] == show["available"]
     )
     scen_pass = (
@@ -144,19 +174,21 @@ def run_hot_seat():
         and show["total_seats"] == 1
         and show["confirmed"] == 1
         and show["available"] == 0
+        and no_errors
     )
 
     print_result(
         "hot-seat",
         st,
         {
-            "Confirmed": f"+{m_end['confirmed'] - m_start['confirmed']}",
-            "Seat-taken": f"+{m_end['seat-taken'] - m_start['seat-taken']}",
-            "Available": show["available"],
+            "New reservations confirmed": f"+{m_end['confirmed'] - m_start['confirmed']}",
+            "Reservations declined - seat unavailable": f"+{m_end['seat-unavailable'] - m_start['seat-unavailable']}",
+            "Available seats": show["available"],
         },
         m_pass,
         recon_pass,
         scen_pass,
+        show,
     )
 
 
@@ -170,8 +202,13 @@ def run_per_user_limit():
     results = run_concurrent(tasks)
     m_end = get_metrics(show_id)
 
-    show = requests.get(f"{BASE_URL}/shows/{show_id}").json()
     st = Counter(r["status"] for r in results)
+    no_errors = st.get("error", 0) == 0 and sum(v for k, v in st.items() if isinstance(k, int) and k >= 500) == 0
+
+    show = get_show_state(show_id)
+    if not show:
+        print_result("per-user-limit", st, {"Error": "Failed to fetch show"}, False, False, False)
+        return
 
     recon_pass = (
         show["available"] + show["held"] + show["confirmed"] == show["total_seats"]
@@ -181,19 +218,20 @@ def run_per_user_limit():
         and (m_end["per-user-limit"] - m_start["per-user-limit"]) == st.get(409, 0)
         and m_end["seats_available"] == show["available"]
     )
-    scen_pass = st.get(201, 0) <= 4 and (st.get(201, 0) + st.get(409, 0) == REQUESTS)
+    scen_pass = st.get(201, 0) <= 4 and (st.get(201, 0) + st.get(409, 0) == REQUESTS) and no_errors
 
     print_result(
         "per-user-limit",
         st,
         {
-            "Confirmed": f"+{m_end['confirmed'] - m_start['confirmed']}",
-            "Per-user-limit": f"+{m_end['per-user-limit'] - m_start['per-user-limit']}",
-            "Available": show["available"],
+            "New reservations confirmed": f"+{m_end['confirmed'] - m_start['confirmed']}",
+            "Reservations declined - per-user limit": f"+{m_end['per-user-limit'] - m_start['per-user-limit']}",
+            "Available seats": show["available"],
         },
         m_pass,
         recon_pass,
         scen_pass,
+        show,
     )
 
 
@@ -206,8 +244,14 @@ def run_idempotency():
     results = run_concurrent(tasks)
     m_end = get_metrics(show_id)
 
-    show = requests.get(f"{BASE_URL}/shows/{show_id}").json()
     st = Counter(r["status"] for r in results)
+    no_errors = st.get("error", 0) == 0 and sum(v for k, v in st.items() if isinstance(k, int) and k >= 500) == 0
+
+    show = get_show_state(show_id)
+    if not show:
+        print_result("idempotency", st, {"Error": "Failed to fetch show"}, False, False, False)
+        return
+
     unique_ids = {
         r["data"]["reservation_id"] for r in results if r["status"] == 201 and r["data"]
     }
@@ -217,24 +261,25 @@ def run_idempotency():
     )
     m_pass = (
         (m_end["confirmed"] - m_start["confirmed"]) == 1
-        and (m_end["idempotent-replay"] - m_start["idempotent-replay"])
+        and (m_end["idempotent_replays"] - m_start["idempotent_replays"])
         == (REQUESTS - 1)
         and m_end["seats_available"] == show["available"]
     )
-    scen_pass = st[201] == REQUESTS and len(unique_ids) == 1
+    scen_pass = st[201] == REQUESTS and len(unique_ids) == 1 and no_errors
 
     print_result(
         "idempotency",
         st,
         {
+            "New reservations confirmed": f"+{m_end['confirmed'] - m_start['confirmed']}",
+            "Idempotent replays": f"+{m_end['idempotent_replays'] - m_start['idempotent_replays']}",
+            "Available seats": show["available"],
             "Unique reservation IDs": len(unique_ids),
-            "Confirmed": f"+{m_end['confirmed'] - m_start['confirmed']}",
-            "Idempotent replay": f"+{m_end['idempotent-replay'] - m_start['idempotent-replay']}",
-            "Available": show["available"],
         },
         m_pass,
         recon_pass,
         scen_pass,
+        show,
     )
 
 
@@ -248,8 +293,13 @@ def run_same_key_different_request():
     results = run_concurrent(tasks)
     m_end = get_metrics(show_id)
 
-    show = requests.get(f"{BASE_URL}/shows/{show_id}").json()
     st = Counter(r["status"] for r in results)
+    no_errors = st.get("error", 0) == 0 and sum(v for k, v in st.items() if isinstance(k, int) and k >= 500) == 0
+
+    show = get_show_state(show_id)
+    if not show:
+        print_result("same-key-different-request", st, {"Error": "Failed to fetch show"}, False, False, False)
+        return
 
     recon_pass = (
         show["available"] + show["held"] + show["confirmed"] == show["total_seats"]
@@ -257,18 +307,19 @@ def run_same_key_different_request():
     m_pass = (m_end["confirmed"] - m_start["confirmed"]) == 1 and m_end[
         "seats_available"
     ] == show["available"]
-    scen_pass = st[201] == 1 and st.get(409, 0) == (REQUESTS - 1)
+    scen_pass = st[201] == 1 and st.get(409, 0) == (REQUESTS - 1) and no_errors
 
     print_result(
         "same-key-different-request",
         st,
         {
-            "Confirmed": f"+{m_end['confirmed'] - m_start['confirmed']}",
-            "Available": show["available"],
+            "New reservations confirmed": f"+{m_end['confirmed'] - m_start['confirmed']}",
+            "Available seats": show["available"],
         },
         m_pass,
         recon_pass,
         scen_pass,
+        show,
     )
 
 
@@ -285,8 +336,13 @@ def run_multi_seat():
     results = run_concurrent(tasks)
     m_end = get_metrics(show_id)
 
-    show = requests.get(f"{BASE_URL}/shows/{show_id}").json()
     st = Counter(r["status"] for r in results)
+    no_errors = st.get("error", 0) == 0 and sum(v for k, v in st.items() if isinstance(k, int) and k >= 500) == 0
+
+    show = get_show_state(show_id)
+    if not show:
+        print_result("multi-seat", st, {"Error": "Failed to fetch show"}, False, False, False)
+        return
 
     all_confirmed = []
     has_three = True
@@ -301,26 +357,29 @@ def run_multi_seat():
     )
     m_pass = (
         (m_end["confirmed"] - m_start["confirmed"]) == st.get(201, 0)
-        and (m_end["seat-taken"] - m_start["seat-taken"]) == st.get(409, 0)
+        and (m_end["seat-unavailable"] - m_start["seat-unavailable"]) == st.get(409, 0)
         and m_end["seats_available"] == show["available"]
     )
     scen_pass = (
         has_three
         and len(all_confirmed) == len(set(all_confirmed))
         and len(all_confirmed) == show["confirmed"]
+        and st.get(201, 0) + st.get(409, 0) == REQUESTS
+        and no_errors
     )
 
     print_result(
         "multi-seat",
         st,
         {
-            "Confirmed": f"+{m_end['confirmed'] - m_start['confirmed']}",
-            "Seat-taken": f"+{m_end['seat-taken'] - m_start['seat-taken']}",
-            "Available": show["available"],
+            "New reservations confirmed": f"+{m_end['confirmed'] - m_start['confirmed']}",
+            "Reservations declined - seat unavailable": f"+{m_end['seat-unavailable'] - m_start['seat-unavailable']}",
+            "Available seats": show["available"],
         },
         m_pass,
         recon_pass,
         scen_pass,
+        show,
     )
 
 
@@ -329,8 +388,8 @@ def run_health():
 
     start = time.time()
     try:
-        live = requests.get(f"{BASE_URL}/health/live")
-        ready = requests.get(f"{BASE_URL}/health/ready")
+        live = requests.get(f"{BASE_URL}/health/live", timeout=15)
+        ready = requests.get(f"{BASE_URL}/health/ready", timeout=15)
     except requests.RequestException as e:
         print(f"Health check failed to connect: {e}")
         return
@@ -351,8 +410,9 @@ def run_health():
 
 
 def main():
-    global REQUESTS, CONCURRENCY
+    global REQUESTS, CONCURRENCY, BASE_URL
     parser = argparse.ArgumentParser()
+    parser.add_argument("--base-url", type=str)
     parser.add_argument(
         "--scenario",
         required=True,
@@ -368,6 +428,9 @@ def main():
     parser.add_argument("--requests", type=int, default=REQUESTS)
     parser.add_argument("--concurrency", type=int, default=CONCURRENCY)
     args = parser.parse_args()
+
+    if args.base_url:
+        BASE_URL = args.base_url
 
     REQUESTS, CONCURRENCY = args.requests, args.concurrency
     globals()[f"run_{args.scenario.replace('-', '_')}"]()

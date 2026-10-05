@@ -6,7 +6,11 @@ from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.metrics import reservations_confirmed_total, reservations_declined_total
+from app.metrics import (
+    idempotent_replays_total,
+    reservations_confirmed_total,
+    reservations_declined_total,
+)
 from app.models import Reservation, ReservationSeat
 from app.repositories.booking_state_repository import BookingStateRepository
 from app.repositories.reservation_repository import ReservationRepository
@@ -70,9 +74,7 @@ class ReservationService:
                         res_seats = await self.reservation_repo.get_reservation_seats(
                             str(existing_res.id)
                         )
-                        reservations_declined_total.labels(
-                            reason="idempotent-replay"
-                        ).inc()
+                        idempotent_replays_total.inc()
                         logger.info(
                             "idempotent replay",
                             extra={
@@ -111,7 +113,7 @@ class ReservationService:
                 )
 
                 if len(seats) != requested_count:
-                    reservations_declined_total.labels(reason="seat-taken").inc()
+                    reservations_declined_total.labels(reason="seat-unavailable").inc()
                     logger.warning(
                         "reservation declined",
                         extra={
@@ -128,7 +130,7 @@ class ReservationService:
 
                 for seat in seats:
                     if seat.status != "available":
-                        reservations_declined_total.labels(reason="seat-taken").inc()
+                        reservations_declined_total.labels(reason="seat-unavailable").inc()
                         logger.warning(
                             "reservation declined",
                             extra={

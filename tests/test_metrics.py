@@ -21,7 +21,11 @@ async def client():
         yield c
 
 
-from app.metrics import reservations_confirmed_total, reservations_declined_total
+from app.metrics import (
+    idempotent_replays_total,
+    reservations_confirmed_total,
+    reservations_declined_total,
+)
 
 
 def get_metric_value(metric_name, labels=None):
@@ -34,16 +38,23 @@ def get_metric_value(metric_name, labels=None):
             return reservations_declined_total.labels(**labels)._value.get()
         except KeyError:
             return 0.0
+    elif metric_name == "idempotent_replays_total":
+        return idempotent_replays_total._value.get()
     return 0.0
 
 
 @pytest.fixture(autouse=True)
 def reset_metrics():
     # Reset counters before each test
-    from app.metrics import reservations_confirmed_total, reservations_declined_total
+    from app.metrics import (
+        idempotent_replays_total,
+        reservations_confirmed_total,
+        reservations_declined_total,
+    )
 
     reservations_confirmed_total._value.set(0)
-    for reason in ["seat-taken", "per-user-limit", "idempotent-replay"]:
+    idempotent_replays_total._value.set(0)
+    for reason in ["seat-unavailable", "per-user-limit"]:
         try:
             reservations_declined_total.labels(reason=reason)._value.set(0)
         except KeyError:
@@ -81,9 +92,7 @@ async def test_idempotent_replay_metrics(client: AsyncClient):
     )
     assert res1.status_code == 201
     initial_confirmed = get_metric_value("reservations_confirmed_total")
-    initial_idempotent = get_metric_value(
-        "reservations_declined_total", {"reason": "idempotent-replay"}
-    )
+    initial_idempotent = get_metric_value("idempotent_replays_total")
 
     # Replay
     res2 = await client.post(
@@ -94,9 +103,7 @@ async def test_idempotent_replay_metrics(client: AsyncClient):
     assert res2.status_code == 201
 
     final_confirmed = get_metric_value("reservations_confirmed_total")
-    final_idempotent = get_metric_value(
-        "reservations_declined_total", {"reason": "idempotent-replay"}
-    )
+    final_idempotent = get_metric_value("idempotent_replays_total")
 
     # Assert confirmed counter NOT incremented
     assert final_confirmed == initial_confirmed
@@ -117,7 +124,7 @@ async def test_seat_taken_increments_counter(client: AsyncClient):
     )
 
     initial_seat_taken = get_metric_value(
-        "reservations_declined_total", {"reason": "seat-taken"}
+        "reservations_declined_total", {"reason": "seat-unavailable"}
     )
 
     # Conflict request
@@ -129,7 +136,7 @@ async def test_seat_taken_increments_counter(client: AsyncClient):
     assert res.status_code == 409
 
     final_seat_taken = get_metric_value(
-        "reservations_declined_total", {"reason": "seat-taken"}
+        "reservations_declined_total", {"reason": "seat-unavailable"}
     )
     assert final_seat_taken == initial_seat_taken + 1
 
@@ -194,6 +201,7 @@ async def test_get_metrics_endpoint(client: AsyncClient):
 
     assert "reservations_confirmed_total" in text
     assert "reservations_declined_total" in text
+    assert "idempotent_replays_total" in text
     assert f'seats_available{{show_id="{show_id}"}} 5.0' in text
 
 
